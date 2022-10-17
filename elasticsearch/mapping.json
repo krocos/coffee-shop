@@ -1,0 +1,86 @@
+{
+  "mappings": {
+    "dynamic": false,
+    "properties": {
+      "created_at": {
+        "type": "date"
+      },
+      "id": {
+        "type": "keyword"
+      },
+      "items": {
+        "properties": {
+          "id": {
+            "type": "keyword"
+          },
+          "item_id": {
+            "type": "keyword"
+          },
+          "order_id": {
+            "type": "keyword"
+          },
+          "price": {
+            "type": "float"
+          },
+          "quantity": {
+            "type": "float"
+          },
+          "title": {
+            "type": "text"
+          },
+          "total_price": {
+            "type": "float"
+          }
+        }
+      },
+      "log_items": {
+        "properties": {
+          "id": {
+            "type": "keyword"
+          },
+          "order_id": {
+            "type": "keyword"
+          },
+          "text": {
+            "type": "text"
+          }
+        }
+      },
+      "pin_code": {
+        "type": "text"
+      },
+      "point": {
+        "properties": {
+          "addr": {
+            "type": "text"
+          },
+          "cache_id": {
+            "type": "keyword"
+          },
+          "id": {
+            "type": "keyword"
+          },
+          "kitchen_id": {
+            "type": "keyword"
+          }
+        }
+      },
+      "status": {
+        "type": "keyword"
+      },
+      "total_price": {
+        "type": "float"
+      },
+      "user": {
+        "properties": {
+          "id": {
+            "type": "keyword"
+          },
+          "name": {
+            "type": "text"
+          }
+        }
+      }
+    }
+  }
+}

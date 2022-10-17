@@ -1,0 +1,58 @@
+### getMenu
+GET http://localhost:8888/user-api/menu
+
+### listUserOrders
+GET http://localhost:8888/user-api/user/33078f89-5b4a-4f9b-bd82-edba6b25945a/orders
+
+### createOrder
+POST http://localhost:8888/user-api/order
+Content-Type: application/json
+
+{
+  "user_id": "33078f89-5b4a-4f9b-bd82-edba6b25945a",
+  "point_id": "3e3b3032-b927-41e9-851a-085b6f1672f3",
+  "items": [
+    {
+      "id": "1047f530-e3af-4099-82f6-e09e8fe1785e",
+      "quantity": 2.0
+    },
+    {
+      "id": "0695dd0c-e8b8-4115-842e-81b9f10d589e",
+      "quantity": 2.0
+    }
+  ]
+}
+
+### paymentEvent
+# successful
+# unsuccessful
+# canceled
+POST http://localhost:8888/payment-gateway-api/order/1db9f4db-00a6-4e3e-b60e-e8026bf1168b/payment-event
+Content-Type: application/json
+
+{
+  "status": "successful",
+  "reason": ""
+}
+
+### orderItemCooked
+POST http://localhost:8888/kitchen-api/order/fb11f824-46b7-4405-9747-6e358965c5e1/item-cooked
+Content-Type: application/json
+
+{
+  "order_item_id": "9b4351a4-fa8e-4116-98de-da3e5003c34a"
+}
+
+### listKitchenCookItems
+GET http://localhost:8888/kitchen-api/kitchen/968b91ca-08b0-4501-af77-9b8f13e6c8c4/cook-items
+
+### receiveOrder
+POST http://localhost:8888/cache-api/order/fb11f824-46b7-4405-9747-6e358965c5e1/receive-order
+Content-Type: application/json
+
+{
+  "pin_code": "1318"
+}
+
+### listCacheOrders
+GET http://localhost:8888/cache-api/cache/e26fc09e-1052-45eb-a7ce-bc3150bb5036/orders
