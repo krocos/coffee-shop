@@ -104,7 +104,7 @@ func (c *CacheOrderCompo) receiveCacheOrder(ctx app.Context, e app.Event) {
 		return
 	}
 
-	res, err := http.Post(fmt.Sprintf("http://%s:8888/cache-api/order/%s/receive-order", host, c.CacheOrder.OrderID.String()),
+	res, err := http.Post(fmt.Sprintf("http://%s/cache-api/order/%s/receive-order", host, c.CacheOrder.OrderID.String()),
 		"application/json", bytes.NewReader(bb))
 	if err != nil {
 		app.Log(err)

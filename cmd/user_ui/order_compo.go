@@ -96,7 +96,7 @@ func (c *OrderCompo) cancelOrder(ctx app.Context, e app.Event) {
 		return
 	}
 
-	res, err := http.Post(fmt.Sprintf("http://%s:8888/payment-gateway-api/order/%s/payment-event", host, c.Order.ID.String()),
+	res, err := http.Post(fmt.Sprintf("http://%s/payment-gateway-api/order/%s/payment-event", host, c.Order.ID.String()),
 		"application/json", bytes.NewReader(bb))
 	if err != nil {
 		app.Log(err)
@@ -125,7 +125,7 @@ func (c *OrderCompo) payForOrder(ctx app.Context, e app.Event) {
 		return
 	}
 
-	res, err := http.Post(fmt.Sprintf("http://%s:8888/payment-gateway-api/order/%s/payment-event", host, c.Order.ID.String()),
+	res, err := http.Post(fmt.Sprintf("http://%s/payment-gateway-api/order/%s/payment-event", host, c.Order.ID.String()),
 		"application/json", bytes.NewReader(bb))
 	if err != nil {
 		app.Log(err)
@@ -170,7 +170,7 @@ func (c *OrderCompo) simulateUnsuccessfulPayment(ctx app.Context, e app.Event) {
 		return
 	}
 
-	res, err := http.Post(fmt.Sprintf("http://%s:8888/payment-gateway-api/order/%s/payment-event", host, c.Order.ID.String()),
+	res, err := http.Post(fmt.Sprintf("http://%s/payment-gateway-api/order/%s/payment-event", host, c.Order.ID.String()),
 		"application/json", bytes.NewReader(bb))
 	if err != nil {
 		app.Log(err)

@@ -154,7 +154,7 @@ func (m *OrderMaker) createNewOrder(ctx app.Context, e app.Event) {
 			return
 		}
 
-		res, err := http.Post(fmt.Sprintf("http://%s:8888/user-api/order", host), "application/json", bytes.NewReader(bb))
+		res, err := http.Post(fmt.Sprintf("http://%s/user-api/order", host), "application/json", bytes.NewReader(bb))
 		if err != nil {
 			app.Log(err)
 			return

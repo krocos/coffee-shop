@@ -60,7 +60,7 @@ func (c *CookItemCompo) cookItemReady(ctx app.Context, e app.Event) {
 		return
 	}
 
-	res, err := http.Post(fmt.Sprintf("http://%s:8888/kitchen-api/order/%s/item-cooked", host, c.CookItem.OrderID.String()),
+	res, err := http.Post(fmt.Sprintf("http://%s/kitchen-api/order/%s/item-cooked", host, c.CookItem.OrderID.String()),
 		"application/json", bytes.NewReader(bb))
 	if err != nil {
 		app.Log(err)

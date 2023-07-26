@@ -9,9 +9,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/maxence-charriere/go-app/v9/pkg/app"
 	"github.com/r3labs/sse/v2"
+
+	"github.com/krocos/coffee-shop/proxy"
 )
 
-const host = "localhost"
+const host = "localhost:8091"
 
 type (
 	User struct {
@@ -55,7 +57,7 @@ func (u *KitchenUI) OnMount(ctx app.Context) {
 	ctx.Handle("updateKitchenCookItems", u.updateKitchenCookItemsAction)
 
 	ctx.Async(func() {
-		res, err := http.Get(fmt.Sprintf("http://%s:8888/user-api/menu", host))
+		res, err := http.Get(fmt.Sprintf("http://%s/user-api/menu", host))
 		if err != nil {
 			app.Log(err)
 			return
@@ -136,7 +138,7 @@ func (u *KitchenUI) kitchenSelectedAction(ctx app.Context, action app.Action) {
 	ctx.NewAction("updateKitchenCookItems")
 
 	ctx.Async(func() {
-		client := sse.NewClient(fmt.Sprintf("http://%s:7995/kitchen/%s", host, u.SelectedPoint.KitchenID.String()))
+		client := sse.NewClient(fmt.Sprintf("http://%s/kitchen/%s", host, u.SelectedPoint.KitchenID.String()))
 		err := client.SubscribeRaw(func(msg *sse.Event) {
 			ctx.NewAction("updateKitchenCookItems")
 		})
@@ -178,13 +180,13 @@ func main() {
 		},
 	})
 
-	if err := http.ListenAndServe(":8091", nil); err != nil {
+	if err := proxy.CreateServer(":8091").ListenAndServe(); err != nil {
 		panic(err)
 	}
 }
 
 func loadKitchenCookItems(kitchenID uuid.UUID) ([]*KitchenCookItemResponse, error) {
-	res, err := http.Get(fmt.Sprintf("http://%s:8888/kitchen-api/kitchen/%s/cook-items", host, kitchenID.String()))
+	res, err := http.Get(fmt.Sprintf("http://%s/kitchen-api/kitchen/%s/cook-items", host, kitchenID.String()))
 	if err != nil {
 		return nil, err
 	}

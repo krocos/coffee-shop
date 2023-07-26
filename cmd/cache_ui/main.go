@@ -9,9 +9,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/maxence-charriere/go-app/v9/pkg/app"
 	"github.com/r3labs/sse/v2"
+
+	"github.com/krocos/coffee-shop/proxy"
 )
 
-const host = "localhost"
+const host = "localhost:8092"
 
 type (
 	User struct {
@@ -57,7 +59,7 @@ func (u *CacheUI) OnMount(ctx app.Context) {
 	ctx.Handle("updateCacheOrders", u.updateCacheOrdersAction)
 
 	ctx.Async(func() {
-		res, err := http.Get(fmt.Sprintf("http://%s:8888/user-api/menu", host))
+		res, err := http.Get(fmt.Sprintf("http://%s/user-api/menu", host))
 		if err != nil {
 			app.Log(err)
 			return
@@ -138,7 +140,7 @@ func (u *CacheUI) cacheSelectedAction(ctx app.Context, action app.Action) {
 	ctx.NewAction("updateCacheOrders")
 
 	ctx.Async(func() {
-		client := sse.NewClient(fmt.Sprintf("http://%s:7995/cache/%s", host, u.SelectedPoint.CacheID.String()))
+		client := sse.NewClient(fmt.Sprintf("http://%s/cache/%s", host, u.SelectedPoint.CacheID.String()))
 		err := client.SubscribeRaw(func(msg *sse.Event) {
 			ctx.NewAction("updateCacheOrders")
 		})
@@ -180,13 +182,13 @@ func main() {
 		},
 	})
 
-	if err := http.ListenAndServe(":8092", nil); err != nil {
+	if err := proxy.CreateServer(":8092").ListenAndServe(); err != nil {
 		panic(err)
 	}
 }
 
 func loadCacheOrders(cacheID uuid.UUID) ([]*CacheOrderResponse, error) {
-	res, err := http.Get(fmt.Sprintf("http://%s:8888/cache-api/cache/%s/orders", host, cacheID.String()))
+	res, err := http.Get(fmt.Sprintf("http://%s/cache-api/cache/%s/orders", host, cacheID.String()))
 	if err != nil {
 		return nil, err
 	}

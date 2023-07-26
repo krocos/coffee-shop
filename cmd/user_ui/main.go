@@ -11,9 +11,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/maxence-charriere/go-app/v9/pkg/app"
 	"github.com/r3labs/sse/v2"
+
+	"github.com/krocos/coffee-shop/proxy"
 )
 
-const host = "localhost"
+const host = "localhost:8090"
 
 func init() {
 	rand.Seed(time.Now().UnixMicro())
@@ -78,7 +80,7 @@ func (u *UserUI) OnMount(ctx app.Context) {
 	ctx.Handle("updateOrders", u.updateOrdersAction)
 
 	ctx.Async(func() {
-		res, err := http.Get(fmt.Sprintf("http://%s:8888/user-api/menu", host))
+		res, err := http.Get(fmt.Sprintf("http://%s/user-api/menu", host))
 		if err != nil {
 			app.Log(err)
 			return
@@ -164,7 +166,7 @@ func (u *UserUI) userSelectedAction(ctx app.Context, action app.Action) {
 	ctx.NewAction("updateOrders")
 
 	ctx.Async(func() {
-		client := sse.NewClient(fmt.Sprintf("http://%s:7995/user/%s", host, u.SelectedUser.ID.String()))
+		client := sse.NewClient(fmt.Sprintf("http://%s/user/%s", host, u.SelectedUser.ID.String()))
 		err := client.SubscribeRaw(func(msg *sse.Event) {
 			ctx.NewAction("updateOrders")
 		})
@@ -208,13 +210,13 @@ func main() {
 		},
 	})
 
-	if err := http.ListenAndServe(":8090", nil); err != nil {
+	if err := proxy.CreateServer(":8090").ListenAndServe(); err != nil {
 		panic(err)
 	}
 }
 
 func getUserOrders(userID uuid.UUID) ([]*UserOrderResponse, error) {
-	res, err := http.Get(fmt.Sprintf("http://%s:8888/user-api/user/%s/orders", host, userID.String()))
+	res, err := http.Get(fmt.Sprintf("http://%s/user-api/user/%s/orders", host, userID.String()))
 	if err != nil {
 		return nil, err
 	}
