@@ -203,7 +203,7 @@ func (m *OrderMaker) itemPrice(itemID uuid.UUID) float64 {
 }
 
 func (m *OrderMaker) updateTotalPrice() {
-	var total float64 = 0.0
+	var total = 0.0
 	for _, state := range m.selectedItems {
 		total += state.total
 	}
