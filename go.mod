@@ -1,12 +1,12 @@
 module github.com/krocos/coffee-shop
 
-go 1.20
+go 1.21
 
 require (
 	github.com/davecgh/go-spew v1.1.1
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/mux v1.8.0
-	github.com/maxence-charriere/go-app/v9 v9.7.3
+	github.com/maxence-charriere/go-app/v9 v9.8.0
 	github.com/olivere/elastic/v7 v7.0.32
 	github.com/r3labs/sse/v2 v2.10.0
 	github.com/rs/cors v1.9.0
