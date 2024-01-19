@@ -110,30 +110,76 @@ type (
 )
 
 func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
-	loc, _ := time.LoadLocation("Asia/Yekaterinburg")
 
-	var (
-		storage    *postgres.Postgres
-		sseService *sse.SSE
-		search     *elasticsearch.Search
-
-		order = &Order{
-			id:        initialData.ID,
-			createdAt: workflow.Now(ctx).In(loc),
-		}
-	)
+	processing := newOrderProcessing(ctx, initialData.ID)
 
 	ao := workflow.ActivityOptions{StartToCloseTimeout: time.Hour}
 	ctx = workflow.WithActivityOptions(ctx, ao)
 
-	// Получаем данные пользователя. Тут это может пригодиться, что бы например вместе с этими данными получить
-	// ещё и данные для предоставления скидки, например. В данном примере нас интересует только имя пользователя.
-	var userData postgres.UserData
-	if err := workflow.ExecuteActivity(ctx, storage.GetUserData, initialData.UserID).Get(ctx, &userData); err != nil {
+	if err := processing.prepareOrder(ctx, initialData); err != nil {
 		return err
 	}
 
-	order.user = &User{
+	if err := processing.processPayment(ctx); err != nil {
+		return err
+	}
+
+	if processing.order.status != orderStatusPaid {
+		// Тут выходим ибо заказ не оплачен.
+		return nil
+	}
+
+	if err := processing.launchCookingOnPoint(ctx); err != nil {
+		return err
+	}
+
+	if err := processing.waitForCooking(ctx); err != nil {
+		return err
+	}
+
+	if err := processing.giveAway(ctx); err != nil {
+		return err
+	}
+
+	if err := processing.cleanUp(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type orderProcessing struct {
+	loc *time.Location
+
+	storage    *postgres.Postgres
+	sseService *sse.SSE
+	search     *elasticsearch.Search
+
+	order *Order
+}
+
+func newOrderProcessing(ctx workflow.Context, orderID uuid.UUID) *orderProcessing {
+	loc, _ := time.LoadLocation("Asia/Yekaterinburg")
+
+	return &orderProcessing{
+		loc: loc,
+		order: &Order{
+			id:        orderID,
+			createdAt: workflow.Now(ctx).In(loc),
+		},
+	}
+}
+
+// prepareOrder создаёт заказ по которому потом дальше работать.
+func (p *orderProcessing) prepareOrder(ctx workflow.Context, initialData OrderInitialData) error {
+	// Получаем данные пользователя. Тут это может пригодиться, что бы например вместе с этими данными получить
+	// ещё и данные для предоставления скидки, например. В данном примере нас интересует только имя пользователя.
+	var userData postgres.UserData
+	if err := workflow.ExecuteActivity(ctx, p.storage.GetUserData, initialData.UserID).Get(ctx, &userData); err != nil {
+		return err
+	}
+
+	p.order.user = &User{
 		id:   userData.ID,
 		name: userData.Name,
 	}
@@ -142,11 +188,11 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 	// скидоную систему, то можно было бы после загрузки данных пользователя добавить и скидку, например.
 	itemIDs := lo.Map(initialData.Items, func(item ItemInitialData, _ int) uuid.UUID { return item.ID })
 	var itemsData []postgres.ItemData
-	if err := workflow.ExecuteActivity(ctx, storage.GetItemsData, itemIDs).Get(ctx, &itemsData); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.GetItemsData, itemIDs).Get(ctx, &itemsData); err != nil {
 		return err
 	}
 
-	order.orderItems = make([]*OrderItem, 0)
+	p.order.orderItems = make([]*OrderItem, 0)
 	for _, data := range itemsData {
 		var orderItemID uuid.UUID
 
@@ -157,7 +203,7 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 
 		quantity := initialData.itemQuantity(data.ID)
 
-		order.orderItems = append(order.orderItems, &OrderItem{
+		p.order.orderItems = append(p.order.orderItems, &OrderItem{
 			id:         orderItemID,
 			title:      data.Title,
 			price:      data.Price,
@@ -170,11 +216,11 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 	// Получаем данные точки. Так как нам в основном надо только адрес и идентификаторы
 	// терминалов кухни и кассы (для данного примера, то только их и получаем).
 	var pointData postgres.PointData
-	if err := workflow.ExecuteActivity(ctx, storage.GetPointData, initialData.PointID).Get(ctx, &pointData); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.GetPointData, initialData.PointID).Get(ctx, &pointData); err != nil {
 		return err
 	}
 
-	order.point = &Point{
+	p.order.point = &Point{
 		id:        pointData.ID,
 		addr:      pointData.Addr,
 		kitchenID: pointData.KitchenID,
@@ -184,30 +230,30 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 	// Создаём пинкод для выдачи заказа.
 	if err := workflow.SideEffect(ctx, func(ctx workflow.Context) interface{} {
 		return fmt.Sprintf("%04d", rand.Intn(10000))
-	}).Get(&order.pinCode); err != nil {
+	}).Get(&p.order.pinCode); err != nil {
 		return err
 	}
 
 	// Назначаем оредеру статус, что ожидает оплаты.
-	order.status = orderStatusWaitingForPayment
+	p.order.status = orderStatusWaitingForPayment
 
 	// Считаем общую сумму заказа.
-	for _, item := range order.orderItems {
-		order.totalPrice += item.totalPrice
+	for _, item := range p.order.orderItems {
+		p.order.totalPrice += item.totalPrice
 	}
 
 	// Записываем ордер в базу для длинной истории.
 	createOrderParams := postgres.OrderParams{
-		ID:         order.id,
-		CreatedAt:  order.createdAt,
-		Status:     order.status,
-		TotalPrice: order.totalPrice,
-		PINCode:    order.pinCode,
-		UserID:     order.user.id,
-		PointID:    order.point.id,
+		ID:         p.order.id,
+		CreatedAt:  p.order.createdAt,
+		Status:     p.order.status,
+		TotalPrice: p.order.totalPrice,
+		PINCode:    p.order.pinCode,
+		UserID:     p.order.user.id,
+		PointID:    p.order.point.id,
 		Items:      make([]postgres.OrderItemParams, 0),
 	}
-	for _, orderItem := range order.orderItems {
+	for _, orderItem := range p.order.orderItems {
 		createOrderParams.Items = append(createOrderParams.Items, postgres.OrderItemParams{
 			ID:         orderItem.id,
 			Title:      orderItem.title,
@@ -217,31 +263,31 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 			TotalPrice: orderItem.totalPrice,
 		})
 	}
-	if err := workflow.ExecuteActivity(ctx, storage.CreateOrder, createOrderParams).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.CreateOrder, createOrderParams).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Индексируем ордер для быстрой выдачи на клиент пользователя (истоиря ордеров бесконечно пополняется).
 
 	searchOrder := elasticsearch.Order{
-		ID:         order.id.String(),
-		CreatedAt:  order.createdAt.Format(time.RFC3339),
-		Status:     order.status,
-		TotalPrice: order.totalPrice,
-		PINCode:    order.pinCode,
+		ID:         p.order.id.String(),
+		CreatedAt:  p.order.createdAt.Format(time.RFC3339),
+		Status:     p.order.status,
+		TotalPrice: p.order.totalPrice,
+		PINCode:    p.order.pinCode,
 		User: &elasticsearch.User{
-			ID:   order.user.id.String(),
-			Name: order.user.name,
+			ID:   p.order.user.id.String(),
+			Name: p.order.user.name,
 		},
 		Point: &elasticsearch.Point{
-			ID:        order.point.id.String(),
-			Addr:      order.point.addr,
-			KitchenID: order.point.kitchenID.String(),
-			CacheID:   order.point.cacheID.String(),
+			ID:        p.order.point.id.String(),
+			Addr:      p.order.point.addr,
+			KitchenID: p.order.point.kitchenID.String(),
+			CacheID:   p.order.point.cacheID.String(),
 		},
 	}
 
-	for _, item := range order.orderItems {
+	for _, item := range p.order.orderItems {
 		searchOrder.Items = append(searchOrder.Items, &elasticsearch.OrderItem{
 			ID:         item.id.String(),
 			Title:      item.title,
@@ -249,35 +295,41 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 			ItemID:     item.itemID.String(),
 			Quantity:   item.quantity,
 			TotalPrice: item.totalPrice,
-			OrderID:    order.id.String(),
+			OrderID:    p.order.id.String(),
 		})
 	}
 
-	for _, logItem := range order.logs {
+	for _, logItem := range p.order.logs {
 		searchOrder.LogItems = append(searchOrder.LogItems, &elasticsearch.LogItem{
 			ID:      logItem.id.String(),
 			Text:    logItem.Text,
-			OrderID: order.id.String(),
+			OrderID: p.order.id.String(),
 		})
 	}
 
-	if err := workflow.ExecuteActivity(ctx, search.IndexOrder, order.id, searchOrder, true).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.search.IndexOrder, p.order.id, searchOrder, true).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Уведомляем клиента пользователя, что заказ создан и ожидает оплаты.
-	if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-		sse.NewOrderListUpdatedEvent().ForUser().WithID(order.user.id)).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+		sse.NewOrderListUpdatedEvent().ForUser().WithID(p.order.user.id)).Get(ctx, nil); err != nil {
 
 		return err
 	}
 
+	return nil
+}
+
+// processPayment ожидает сигнала об оплате от платёжного интегратора, таймаута
+// или отмены заказа.
+func (p *orderProcessing) processPayment(ctx workflow.Context) error {
 	// Ожидаем сигнала об оплате от платёжного интегратора, таймаута или отмены заказа.
 
 	paymentSignals := workflow.GetSignalChannel(ctx, "payment_signals")
 
 	for {
-		if order.status != orderStatusWaitingForPayment {
+		if p.order.status != orderStatusWaitingForPayment {
 			break
 		}
 
@@ -294,16 +346,16 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 
 			switch s.Status {
 			case paymentSignalSuccessful:
-				order.status = orderStatusPaid
+				p.order.status = orderStatusPaid
 			case paymentSignalUnsuccessful:
 				unsuccessfulPaymentReason = s.Reason
 			case paymentSignalCanceled:
-				order.status = orderStatusPaymentCanceled
+				p.order.status = orderStatusPaymentCanceled
 			}
 		})
 		paymentSelector.AddFuture(paymentTimeout, func(f workflow.Future) {
 			// Устанавливаем статус, что оплата просрочена (заказ отменяется и выходим после селекта).
-			order.status = orderStatusPaymentTimeout
+			p.order.status = orderStatusPaymentTimeout
 		})
 
 		paymentSelector.Select(ctx)
@@ -323,15 +375,15 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 				return err
 			}
 
-			order.logs = append(order.logs, &LogItem{
+			p.order.logs = append(p.order.logs, &LogItem{
 				id:   logID,
 				Text: text,
 			})
 
 			// Добавляем запись лога в базу данных.
-			if err := workflow.ExecuteActivity(ctx, storage.LogUnsuccessfulPayment, postgres.LogUnsuccessfulPaymentParams{
+			if err := workflow.ExecuteActivity(ctx, p.storage.LogUnsuccessfulPayment, postgres.LogUnsuccessfulPaymentParams{
 				ID:      logID,
-				OrderID: order.id,
+				OrderID: p.order.id,
 				Reason:  text,
 			}).Get(ctx, nil); err != nil {
 				return err
@@ -340,21 +392,21 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 			// Обновляем логи в индексе.
 
 			logs := make([]*elasticsearch.LogItem, 0)
-			for _, l := range order.logs {
+			for _, l := range p.order.logs {
 				logs = append(logs, &elasticsearch.LogItem{
 					ID:      l.id.String(),
 					Text:    l.Text,
-					OrderID: order.id.String(),
+					OrderID: p.order.id.String(),
 				})
 			}
 
-			if err := workflow.ExecuteActivity(ctx, search.UpdateOrder, order.id, &elasticsearch.Order{LogItems: logs}, true).Get(ctx, nil); err != nil {
+			if err := workflow.ExecuteActivity(ctx, p.search.UpdateOrder, p.order.id, &elasticsearch.Order{LogItems: logs}, true).Get(ctx, nil); err != nil {
 				return err
 			}
 
 			// Уведомляем пользователя о новых логах.
-			if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-				sse.NewUnsuccessfulPayAttemptEvent().ForUser().WithID(order.user.id)).Get(ctx, nil); err != nil {
+			if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+				sse.NewUnsuccessfulPayAttemptEvent().ForUser().WithID(p.order.user.id)).Get(ctx, nil); err != nil {
 
 				return err
 			}
@@ -364,47 +416,48 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 	}
 
 	// Записываем измеение статуса ордера в базу данных для клинета пользователя.
-	if err := workflow.ExecuteActivity(ctx, storage.UpdateOrderStatus, order.id, order.status).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.UpdateOrderStatus, p.order.id, p.order.status).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Ообновляем статус заказа в индексе.
-	if err := workflow.ExecuteActivity(ctx, search.UpdateOrder, order.id, &elasticsearch.Order{Status: order.status}, true).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.search.UpdateOrder, p.order.id, &elasticsearch.Order{Status: p.order.status}, true).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Уведомляем клиента пользователя, что статус заказа изменился.
-	if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-		sse.NewOrderListUpdatedEvent().ForUser().WithID(order.user.id)).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+		sse.NewOrderListUpdatedEvent().ForUser().WithID(p.order.user.id)).Get(ctx, nil); err != nil {
 
 		return err
 	}
 
-	if order.status != orderStatusPaid {
-		// Тут выходим ибо заказ не оплачен.
-		return nil
-	}
+	return nil
+}
 
+// launchCookingOnPoint запускаем процесс готовки на точке, отправляем данные
+// для готовки на её кухню и информацию для кассира.
+func (p *orderProcessing) launchCookingOnPoint(ctx workflow.Context) error {
 	// Записываем в заказы кухни на точке, какие итемы надо приготовить.
 	cookingParams := postgres.AddItemsForCookingParams{
-		KitchenID: order.point.kitchenID,
-		OrderID:   order.id,
+		KitchenID: p.order.point.kitchenID,
+		OrderID:   p.order.id,
 		Items:     make([]postgres.ItemForCooking, 0),
 	}
-	for _, item := range order.orderItems {
+	for _, item := range p.order.orderItems {
 		cookingParams.Items = append(cookingParams.Items, postgres.ItemForCooking{
 			ID:       item.id,
 			Title:    item.title,
 			Quantity: item.quantity,
 		})
 	}
-	if err := workflow.ExecuteActivity(ctx, storage.AddItemsForKitchen, cookingParams).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.AddItemsForKitchen, cookingParams).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Уведомляем клиент кухни точки, что появились новые итемы на приготовку.
-	if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-		sse.NewItemListUpdatedEvent().ForKitchen().WithID(order.point.kitchenID)).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+		sse.NewItemListUpdatedEvent().ForKitchen().WithID(p.order.point.kitchenID)).Get(ctx, nil); err != nil {
 
 		return err
 	}
@@ -413,15 +466,15 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 	// оператор кассы знал что заказ готовится, что бы говорить с клиентом, если он рано явился.
 
 	checkList := make([]string, 0)
-	for _, item := range order.orderItems {
+	for _, item := range p.order.orderItems {
 		checkList = append(checkList, fmt.Sprintf("%s %.0f шт.", item.title, item.quantity))
 	}
 
-	if err := workflow.ExecuteActivity(ctx, storage.AddNewOrderForCache, postgres.AddNewOrderForCacheParams{
-		ID:               order.id,
-		CacheID:          order.point.cacheID,
-		OrderID:          order.id,
-		UserName:         order.user.name,
+	if err := workflow.ExecuteActivity(ctx, p.storage.AddNewOrderForCache, postgres.AddNewOrderForCacheParams{
+		ID:               p.order.id,
+		CacheID:          p.order.point.cacheID,
+		OrderID:          p.order.id,
+		UserName:         p.order.user.name,
 		Status:           cacheOrderStatusCooking,
 		ReadinessPercent: 0,
 		CheckList:        strings.Join(checkList, ", "),
@@ -430,33 +483,36 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 	}
 
 	// Уведомляем клиент кассы точки, что есть готовящийся заказ.
-	if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-		sse.NewOrderListUpdatedEvent().ForCache().WithID(order.point.cacheID)).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+		sse.NewOrderListUpdatedEvent().ForCache().WithID(p.order.point.cacheID)).Get(ctx, nil); err != nil {
 
 		return err
 	}
 
-	order.status = orderStatusCooking
+	p.order.status = orderStatusCooking
 
 	// Изменить статус заказа для клиента пользователя, что заказ готовится.
-	if err := workflow.ExecuteActivity(ctx, storage.UpdateOrderStatus, order.id, order.status).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.UpdateOrderStatus, p.order.id, p.order.status).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Ообновляем статус заказа в индексе.
-	if err := workflow.ExecuteActivity(ctx, search.UpdateOrder, order.id, &elasticsearch.Order{Status: order.status}, true).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.search.UpdateOrder, p.order.id, &elasticsearch.Order{Status: p.order.status}, true).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Уведомить клиент пользователя, что изменился статус заказа.
-	if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-		sse.NewOrderListUpdatedEvent().ForUser().WithID(order.user.id)).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+		sse.NewOrderListUpdatedEvent().ForUser().WithID(p.order.user.id)).Get(ctx, nil); err != nil {
 
 		return err
 	}
 
-	// Начинаем слушать сигналы от кухни, что итемы приготовились.
+	return nil
+}
 
+// waitForCooking ожидание готовности заказа.
+func (p *orderProcessing) waitForCooking(ctx workflow.Context) error {
 	cookingSignals := workflow.GetSignalChannel(ctx, "cooking_signals")
 
 	for {
@@ -471,7 +527,7 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 			var s CookingSignal
 			ch.Receive(ctx, &s)
 
-			for _, orderItem := range order.orderItems {
+			for _, orderItem := range p.order.orderItems {
 				if orderItem.id.String() == s.OrderItemID.String() {
 					orderItem.ready = true
 					cookedOrderItemID = s.OrderItemID
@@ -486,7 +542,7 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 			notReady int
 		)
 
-		for _, orderItem := range order.orderItems {
+		for _, orderItem := range p.order.orderItems {
 			if orderItem.ready {
 				ready++
 			} else {
@@ -503,31 +559,31 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 		}
 
 		// Удаляем приготовленный итем с кухни, что бы не отображался на экране клиента кухни.
-		if err := workflow.ExecuteActivity(ctx, storage.RemoveKitchenCookItemAsReady, cookedOrderItemID).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.storage.RemoveKitchenCookItemAsReady, cookedOrderItemID).Get(ctx, nil); err != nil {
 			return err
 		}
 
 		// Уведомляем клиент кухни, что бы перезагузил заказы.
-		if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-			sse.NewItemListUpdatedEvent().ForKitchen().WithID(order.point.kitchenID)).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+			sse.NewItemListUpdatedEvent().ForKitchen().WithID(p.order.point.kitchenID)).Get(ctx, nil); err != nil {
 
 			return err
 		}
 
 		// Обновляем процент готовности на кассе.
-		if err := workflow.ExecuteActivity(ctx, storage.UpdateCacheOrderReadinessPercent, order.id, readyPercent).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.storage.UpdateCacheOrderReadinessPercent, p.order.id, readyPercent).Get(ctx, nil); err != nil {
 			return err
 		}
 
 		if readyPercent == 100 {
-			if err := workflow.ExecuteActivity(ctx, storage.UpdateCacheOrderStatus, order.id, cacheOrderStatusReady).Get(ctx, nil); err != nil {
+			if err := workflow.ExecuteActivity(ctx, p.storage.UpdateCacheOrderStatus, p.order.id, cacheOrderStatusReady).Get(ctx, nil); err != nil {
 				return err
 			}
 		}
 
 		// Уведомляем клиент кассы, что изменился процент готовности заказа.
-		if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-			sse.NewOrderListUpdatedEvent().ForCache().WithID(order.point.cacheID)).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+			sse.NewOrderListUpdatedEvent().ForCache().WithID(p.order.point.cacheID)).Get(ctx, nil); err != nil {
 
 			return err
 		}
@@ -536,21 +592,21 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 			continue
 		}
 
-		order.status = orderStatusReady
+		p.order.status = orderStatusReady
 
 		// Если заказ готов, то обновляем статус заказа для клиента пользователя.
-		if err := workflow.ExecuteActivity(ctx, storage.UpdateOrderStatus, order.id, order.status).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.storage.UpdateOrderStatus, p.order.id, p.order.status).Get(ctx, nil); err != nil {
 			return err
 		}
 
 		// Ообновляем статус заказа в индексе.
-		if err := workflow.ExecuteActivity(ctx, search.UpdateOrder, order.id, &elasticsearch.Order{Status: order.status}, true).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.search.UpdateOrder, p.order.id, &elasticsearch.Order{Status: p.order.status}, true).Get(ctx, nil); err != nil {
 			return err
 		}
 
 		// Уведомляем клиент пользователя, что статус заказа изменился.
-		if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-			sse.NewOrderListUpdatedEvent().ForUser().WithID(order.user.id)).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+			sse.NewOrderListUpdatedEvent().ForUser().WithID(p.order.user.id)).Get(ctx, nil); err != nil {
 
 			return err
 		}
@@ -558,6 +614,10 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 		break
 	}
 
+	return nil
+}
+
+func (p *orderProcessing) giveAway(ctx workflow.Context) error {
 	receiveSignals := workflow.GetSignalChannel(ctx, "receive_signals")
 	receiveSelector := workflow.NewSelector(ctx)
 
@@ -565,17 +625,17 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 		var rc ReceiveSignal
 		ch.Receive(ctx, &rc)
 
-		if order.pinCode != rc.PINCode {
+		if p.order.pinCode != rc.PINCode {
 			return
 		}
 
-		order.status = orderStatusReceived
+		p.order.status = orderStatusReceived
 	})
 
 	for {
 		receiveSelector.Select(ctx)
 
-		if order.status == orderStatusReceived {
+		if p.order.status == orderStatusReceived {
 			break
 		}
 
@@ -591,16 +651,16 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 			return err
 		}
 
-		order.logs = append(order.logs, &LogItem{
+		p.order.logs = append(p.order.logs, &LogItem{
 			id:   logID,
 			Text: text,
 		})
 
 		// Логируем, что была неудачная попытка ввести пинкод.
-		if err := workflow.ExecuteActivity(ctx, storage.LogAttemptToEnterWrongPINCode, postgres.LogAttemptToEnterWrongPINCodeParams{
+		if err := workflow.ExecuteActivity(ctx, p.storage.LogAttemptToEnterWrongPINCode, postgres.LogAttemptToEnterWrongPINCodeParams{
 			ID:      logID,
 			Reason:  text,
-			OrderID: order.id,
+			OrderID: p.order.id,
 		}).Get(ctx, nil); err != nil {
 			return err
 		}
@@ -608,53 +668,55 @@ func OrderWorkflow(ctx workflow.Context, initialData OrderInitialData) error {
 		// Обновляем логи в индексе.
 
 		logs := make([]*elasticsearch.LogItem, 0)
-		for _, l := range order.logs {
+		for _, l := range p.order.logs {
 			logs = append(logs, &elasticsearch.LogItem{
 				ID:      l.id.String(),
 				Text:    l.Text,
-				OrderID: order.id.String(),
+				OrderID: p.order.id.String(),
 			})
 		}
 
-		if err := workflow.ExecuteActivity(ctx, search.UpdateOrder, order.id, &elasticsearch.Order{LogItems: logs}, true).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.search.UpdateOrder, p.order.id, &elasticsearch.Order{LogItems: logs}, true).Get(ctx, nil); err != nil {
 			return err
 		}
 
 		// Отправляем уведомление.
-		if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-			sse.NewAttemptToEnterWrongPINCodeEvent().ForUser().WithID(order.user.id)).Get(ctx, nil); err != nil {
+		if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+			sse.NewAttemptToEnterWrongPINCodeEvent().ForUser().WithID(p.order.user.id)).Get(ctx, nil); err != nil {
 
 			return err
 		}
 	}
 
-	// Тут мы уже считаем, что заказ был выдан.
+	return nil
+}
 
+func (p *orderProcessing) cleanUp(ctx workflow.Context) error {
 	// Убираем заказ из списка закакоз для кассы.
-	if err := workflow.ExecuteActivity(ctx, storage.RemoveCacheOrderAsReady, order.id).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.RemoveCacheOrderAsReady, p.order.id).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Уведомляем кассу, что бы обновила список заказов.
-	if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-		sse.NewOrderListUpdatedEvent().ForCache().WithID(order.point.cacheID)).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+		sse.NewOrderListUpdatedEvent().ForCache().WithID(p.order.point.cacheID)).Get(ctx, nil); err != nil {
 
 		return err
 	}
 
 	// Обновляем статус заказа для клиента пользователя.
-	if err := workflow.ExecuteActivity(ctx, storage.UpdateOrderStatus, order.id, order.status).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.storage.UpdateOrderStatus, p.order.id, p.order.status).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Ообновляем статус заказа в индексе.
-	if err := workflow.ExecuteActivity(ctx, search.UpdateOrder, order.id, &elasticsearch.Order{Status: order.status}, true).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.search.UpdateOrder, p.order.id, &elasticsearch.Order{Status: p.order.status}, true).Get(ctx, nil); err != nil {
 		return err
 	}
 
 	// Уведомляем клиент пользователя, что статус заказа изменился.
-	if err := workflow.ExecuteActivity(ctx, sseService.SendNotification,
-		sse.NewOrderListUpdatedEvent().ForUser().WithID(order.user.id)).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, p.sseService.SendNotification,
+		sse.NewOrderListUpdatedEvent().ForUser().WithID(p.order.user.id)).Get(ctx, nil); err != nil {
 
 		return err
 	}
