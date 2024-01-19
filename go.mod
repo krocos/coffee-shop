@@ -11,6 +11,7 @@ require (
 	github.com/r3labs/sse/v2 v2.10.0
 	github.com/rs/cors v1.9.0
 	github.com/samber/lo v1.38.1
+	github.com/stretchr/testify v1.8.4
 	go.temporal.io/sdk v1.25.1
 	go.uber.org/zap v1.26.0
 	gorm.io/driver/postgres v1.5.2
@@ -38,7 +39,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/robfig/cron v1.2.0 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
-	github.com/stretchr/testify v1.8.4 // indirect
 	go.temporal.io/api v1.24.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
